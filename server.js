@@ -21,9 +21,8 @@ function requireApiKey(req, res, next) {
 
 // ═══════════════════════════════════════════════════════════════════════
 // ROUTE 1 — Safaricom C2B callback
-// Safaricom POSTs here when a customer pays to your Till/Paybill.
 // ═══════════════════════════════════════════════════════════════════════
-app.post("/mpesa/c2b", (req, res) => {
+app.post("/callback/c2b", (req, res) => {
   try {
     const body = req.body;
     console.log("[C2B] Incoming payment:", JSON.stringify(body, null, 2));
@@ -65,15 +64,13 @@ app.post("/mpesa/c2b", (req, res) => {
 
 // ═══════════════════════════════════════════════════════════════════════
 // ROUTE 2 — Safaricom STK Push callback
-// Safaricom POSTs here after customer enters PIN (success or failure).
-// Different payload structure from C2B — nested under Body.stkCallback.
 // ═══════════════════════════════════════════════════════════════════════
-app.post("/mpesa/stk/callback", (req, res) => {
+app.post("/callback/stk", (req, res) => {
   try {
-    const body        = req.body;
+    const body     = req.body;
     console.log("[STK] Callback received:", JSON.stringify(body, null, 2));
 
-    const callback    = body?.Body?.stkCallback;
+    const callback = body?.Body?.stkCallback;
     if (!callback) {
       console.warn("[STK] Invalid callback structure");
       return res.json({ ResultCode: 0, ResultDesc: "Accepted" });
@@ -82,38 +79,33 @@ app.post("/mpesa/stk/callback", (req, res) => {
     const resultCode  = callback.ResultCode;
     const resultDesc  = callback.ResultDesc        || "";
     const checkoutId  = callback.CheckoutRequestID || "";
-    const merchantId  = callback.MerchantRequestID || "";
 
     console.log(`[STK] CheckoutRequestID: ${checkoutId} | ResultCode: ${resultCode} | ${resultDesc}`);
 
-    // Only store successful payments (ResultCode 0)
     if (resultCode !== 0) {
       console.log(`[STK] Payment failed or cancelled — not storing. Code: ${resultCode}`);
       return res.json({ ResultCode: 0, ResultDesc: "Accepted" });
     }
 
-    // Extract metadata items
-    const items       = callback.CallbackMetadata?.Item || [];
-    const getItem     = (name) => items.find(i => i.Name === name)?.Value ?? null;
+    const items    = callback.CallbackMetadata?.Item || [];
+    const getItem  = (name) => items.find(i => i.Name === name)?.Value ?? null;
 
-    const amount          = parseFloat(getItem("Amount")             || 0);
-    const receiptNumber   = getItem("MpesaReceiptNumber")            || "";
-    const phone           = String(getItem("PhoneNumber")            || "");
-    const transactionTime = String(getItem("TransactionDate")        || new Date().toISOString());
+    const amount          = parseFloat(getItem("Amount")          || 0);
+    const receiptNumber   = getItem("MpesaReceiptNumber")         || "";
+    const phone           = String(getItem("PhoneNumber")         || "");
+    const transactionTime = String(getItem("TransactionDate")     || new Date().toISOString());
 
     if (!receiptNumber || amount <= 0) {
       console.warn("[STK] Missing receipt number or amount — skipping");
       return res.json({ ResultCode: 0, ResultDesc: "Accepted" });
     }
 
-    // Store using the same payments table as C2B
-    // transaction_id = MpesaReceiptNumber so polling can find it
     db.insertPayment({
       transaction_id:   receiptNumber,
       amount,
       phone,
-      customer_name:    "STK Customer",   // STK doesn't return name
-      account_ref:      checkoutId,        // store checkoutId as ref for lookup
+      customer_name:    "STK Customer",
+      account_ref:      checkoutId,
       short_code:       "",
       transaction_time: transactionTime,
       raw:              JSON.stringify(body),
@@ -131,7 +123,7 @@ app.post("/mpesa/stk/callback", (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════
 // ROUTE 3 — POS polls this to check for a pending payment
 // ═══════════════════════════════════════════════════════════════════════
-app.get("/mpesa/payment", requireApiKey, (req, res) => {
+app.get("/payments/pending", requireApiKey, (req, res) => {
   const amount     = parseFloat(req.query.amount     || "0");
   const accountRef = (req.query.account_ref || "").trim();
   const shortCode  = (req.query.short_code  || "").trim();
@@ -160,7 +152,7 @@ app.get("/mpesa/payment", requireApiKey, (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════
 // ROUTE 4 — POS confirms it has consumed a payment
 // ═══════════════════════════════════════════════════════════════════════
-app.post("/mpesa/payment/confirm", requireApiKey, (req, res) => {
+app.post("/payments/confirm", requireApiKey, (req, res) => {
   const { transaction_id } = req.body;
   if (!transaction_id) {
     return res.status(400).json({ error: "transaction_id is required" });
@@ -172,21 +164,20 @@ app.post("/mpesa/payment/confirm", requireApiKey, (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════
 // ROUTE 5 — Register C2B URLs with Safaricom (run once per shortcode)
 // ═══════════════════════════════════════════════════════════════════════
-app.post("/mpesa/register", requireApiKey, async (req, res) => {
+app.post("/register/urls", requireApiKey, async (req, res) => {
   const { consumer_key, consumer_secret, short_code, environment } = req.body;
 
   if (!consumer_key || !consumer_secret || !short_code) {
     return res.status(400).json({ error: "consumer_key, consumer_secret and short_code are required" });
   }
 
-  const baseUrl = environment === "production"
+  const baseUrl   = environment === "production"
     ? "https://api.safaricom.co.ke"
     : "https://sandbox.safaricom.co.ke";
 
   const serverUrl = process.env.SERVER_URL || `https://${req.headers.host}`;
 
   try {
-    // Step 1 — get token
     const credentials = Buffer.from(`${consumer_key}:${consumer_secret}`).toString("base64");
     const tokenRes    = await fetch(
       `${baseUrl}/oauth/v1/generate?grant_type=client_credentials`,
@@ -199,12 +190,11 @@ app.post("/mpesa/register", requireApiKey, async (req, res) => {
       return res.status(400).json({ error: "Could not get token", detail: tokenData });
     }
 
-    // Step 2 — register URLs
     const payload = {
       ShortCode:       short_code,
       ResponseType:    "Completed",
-      ConfirmationURL: `${serverUrl}/mpesa/c2b`,
-      ValidationURL:   `${serverUrl}/mpesa/c2b`,
+      ConfirmationURL: `${serverUrl}/callback/c2b`,
+      ValidationURL:   `${serverUrl}/callback/c2b`,
     };
 
     const regRes  = await fetch(`${baseUrl}/mpesa/c2b/v1/registerurl`, {
@@ -218,7 +208,7 @@ app.post("/mpesa/register", requireApiKey, async (req, res) => {
     const regData = await regRes.json();
 
     console.log("[Register] Response:", regData);
-    res.json({ ok: true, response: regData, registered_url: `${serverUrl}/mpesa/c2b` });
+    res.json({ ok: true, response: regData, registered_url: `${serverUrl}/callback/c2b` });
 
   } catch (err) {
     res.status(500).json({ error: String(err) });
