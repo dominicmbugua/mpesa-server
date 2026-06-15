@@ -11,9 +11,6 @@ app.use(cors());
 app.use(express.json());
 
 // ── API Key guard ──────────────────────────────────────────────────────
-// All routes except the Safaricom callback require an API key.
-// Safaricom doesn't send an API key so /mpesa/c2b is unguarded
-// but validated by checking the payload structure instead.
 function requireApiKey(req, res, next) {
   const key = req.headers["x-api-key"];
   if (!key || key !== process.env.API_KEY) {
@@ -25,14 +22,12 @@ function requireApiKey(req, res, next) {
 // ═══════════════════════════════════════════════════════════════════════
 // ROUTE 1 — Safaricom C2B callback
 // Safaricom POSTs here when a customer pays to your Till/Paybill.
-// Must respond with { ResultCode: 0 } quickly or Safaricom retries.
 // ═══════════════════════════════════════════════════════════════════════
 app.post("/mpesa/c2b", (req, res) => {
   try {
     const body = req.body;
     console.log("[C2B] Incoming payment:", JSON.stringify(body, null, 2));
 
-    // Safaricom sends different fields for Paybill vs Till
     const transactionId   = body.TransID            || body.TransactionID || "";
     const amount          = parseFloat(body.TransAmount || body.Amount || 0);
     const phone           = body.MSISDN             || body.PhoneNumber   || "";
@@ -45,11 +40,9 @@ app.post("/mpesa/c2b", (req, res) => {
     const transactionTime = body.TransTime          || new Date().toISOString();
 
     if (!transactionId || amount <= 0) {
-      // Invalid payload — still return success so Safaricom doesn't retry
       return res.json({ ResultCode: 0, ResultDesc: "Accepted" });
     }
 
-    // Store in DB (ignore duplicates)
     db.insertPayment({
       transaction_id:   transactionId,
       amount,
@@ -66,15 +59,77 @@ app.post("/mpesa/c2b", (req, res) => {
 
   } catch (err) {
     console.error("[C2B] Error:", err);
-    // Always return success to Safaricom even on our errors
     res.json({ ResultCode: 0, ResultDesc: "Accepted" });
   }
 });
 
 // ═══════════════════════════════════════════════════════════════════════
-// ROUTE 2 — POS polls this to check for a pending payment
-// The POS sends the expected amount and optional account ref.
-// Returns the most recent unmatched payment that fits.
+// ROUTE 2 — Safaricom STK Push callback
+// Safaricom POSTs here after customer enters PIN (success or failure).
+// Different payload structure from C2B — nested under Body.stkCallback.
+// ═══════════════════════════════════════════════════════════════════════
+app.post("/mpesa/stk/callback", (req, res) => {
+  try {
+    const body        = req.body;
+    console.log("[STK] Callback received:", JSON.stringify(body, null, 2));
+
+    const callback    = body?.Body?.stkCallback;
+    if (!callback) {
+      console.warn("[STK] Invalid callback structure");
+      return res.json({ ResultCode: 0, ResultDesc: "Accepted" });
+    }
+
+    const resultCode  = callback.ResultCode;
+    const resultDesc  = callback.ResultDesc        || "";
+    const checkoutId  = callback.CheckoutRequestID || "";
+    const merchantId  = callback.MerchantRequestID || "";
+
+    console.log(`[STK] CheckoutRequestID: ${checkoutId} | ResultCode: ${resultCode} | ${resultDesc}`);
+
+    // Only store successful payments (ResultCode 0)
+    if (resultCode !== 0) {
+      console.log(`[STK] Payment failed or cancelled — not storing. Code: ${resultCode}`);
+      return res.json({ ResultCode: 0, ResultDesc: "Accepted" });
+    }
+
+    // Extract metadata items
+    const items       = callback.CallbackMetadata?.Item || [];
+    const getItem     = (name) => items.find(i => i.Name === name)?.Value ?? null;
+
+    const amount          = parseFloat(getItem("Amount")             || 0);
+    const receiptNumber   = getItem("MpesaReceiptNumber")            || "";
+    const phone           = String(getItem("PhoneNumber")            || "");
+    const transactionTime = String(getItem("TransactionDate")        || new Date().toISOString());
+
+    if (!receiptNumber || amount <= 0) {
+      console.warn("[STK] Missing receipt number or amount — skipping");
+      return res.json({ ResultCode: 0, ResultDesc: "Accepted" });
+    }
+
+    // Store using the same payments table as C2B
+    // transaction_id = MpesaReceiptNumber so polling can find it
+    db.insertPayment({
+      transaction_id:   receiptNumber,
+      amount,
+      phone,
+      customer_name:    "STK Customer",   // STK doesn't return name
+      account_ref:      checkoutId,        // store checkoutId as ref for lookup
+      short_code:       "",
+      transaction_time: transactionTime,
+      raw:              JSON.stringify(body),
+    });
+
+    console.log(`[STK] Saved: ${receiptNumber} | KES ${amount} | ${phone}`);
+    res.json({ ResultCode: 0, ResultDesc: "Accepted" });
+
+  } catch (err) {
+    console.error("[STK] Callback error:", err);
+    res.json({ ResultCode: 0, ResultDesc: "Accepted" });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// ROUTE 3 — POS polls this to check for a pending payment
 // ═══════════════════════════════════════════════════════════════════════
 app.get("/mpesa/payment", requireApiKey, (req, res) => {
   const amount     = parseFloat(req.query.amount     || "0");
@@ -103,8 +158,7 @@ app.get("/mpesa/payment", requireApiKey, (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════
-// ROUTE 3 — POS confirms it has consumed a payment
-// Call this after the sale is saved so the payment isn't matched again.
+// ROUTE 4 — POS confirms it has consumed a payment
 // ═══════════════════════════════════════════════════════════════════════
 app.post("/mpesa/payment/confirm", requireApiKey, (req, res) => {
   const { transaction_id } = req.body;
@@ -116,8 +170,7 @@ app.post("/mpesa/payment/confirm", requireApiKey, (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════
-// ROUTE 4 — Register C2B URLs with Safaricom (run once per shortcode)
-// POST { consumer_key, consumer_secret, short_code, environment }
+// ROUTE 5 — Register C2B URLs with Safaricom (run once per shortcode)
 // ═══════════════════════════════════════════════════════════════════════
 app.post("/mpesa/register", requireApiKey, async (req, res) => {
   const { consumer_key, consumer_secret, short_code, environment } = req.body;
@@ -173,7 +226,7 @@ app.post("/mpesa/register", requireApiKey, async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════
-// ROUTE 5 — Health check
+// ROUTE 6 — Health check
 // ═══════════════════════════════════════════════════════════════════════
 app.get("/health", (req, res) => {
   res.json({ ok: true, time: new Date().toISOString() });
