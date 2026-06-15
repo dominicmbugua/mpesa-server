@@ -6,11 +6,9 @@ const db      = require("./db");
 const app  = express();
 const PORT = process.env.PORT || 3000;
 
-// ── Middleware ─────────────────────────────────────────────────────────
 app.use(cors());
 app.use(express.json());
 
-// ── API Key guard ──────────────────────────────────────────────────────
 function requireApiKey(req, res, next) {
   const key = req.headers["x-api-key"];
   if (!key || key !== process.env.API_KEY) {
@@ -22,7 +20,7 @@ function requireApiKey(req, res, next) {
 // ═══════════════════════════════════════════════════════════════════════
 // ROUTE 1 — Safaricom C2B callback
 // ═══════════════════════════════════════════════════════════════════════
-app.post("/callback/c2b", (req, res) => {
+app.post("/notify/payment", (req, res) => {
   try {
     const body = req.body;
     console.log("[C2B] Incoming payment:", JSON.stringify(body, null, 2));
@@ -65,7 +63,7 @@ app.post("/callback/c2b", (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════
 // ROUTE 2 — Safaricom STK Push callback
 // ═══════════════════════════════════════════════════════════════════════
-app.post("/callback/stk", (req, res) => {
+app.post("/notify/stk", (req, res) => {
   try {
     const body     = req.body;
     console.log("[STK] Callback received:", JSON.stringify(body, null, 2));
@@ -90,10 +88,10 @@ app.post("/callback/stk", (req, res) => {
     const items    = callback.CallbackMetadata?.Item || [];
     const getItem  = (name) => items.find(i => i.Name === name)?.Value ?? null;
 
-    const amount          = parseFloat(getItem("Amount")          || 0);
-    const receiptNumber   = getItem("MpesaReceiptNumber")         || "";
-    const phone           = String(getItem("PhoneNumber")         || "");
-    const transactionTime = String(getItem("TransactionDate")     || new Date().toISOString());
+    const amount          = parseFloat(getItem("Amount")      || 0);
+    const receiptNumber   = getItem("MpesaReceiptNumber")     || "";
+    const phone           = String(getItem("PhoneNumber")     || "");
+    const transactionTime = String(getItem("TransactionDate") || new Date().toISOString());
 
     if (!receiptNumber || amount <= 0) {
       console.warn("[STK] Missing receipt number or amount — skipping");
@@ -193,8 +191,8 @@ app.post("/register/urls", requireApiKey, async (req, res) => {
     const payload = {
       ShortCode:       short_code,
       ResponseType:    "Completed",
-      ConfirmationURL: `${serverUrl}/callback/c2b`,
-      ValidationURL:   `${serverUrl}/callback/c2b`,
+      ConfirmationURL: `${serverUrl}/notify/payment`,
+      ValidationURL:   `${serverUrl}/notify/payment`,
     };
 
     const regRes  = await fetch(`${baseUrl}/mpesa/c2b/v1/registerurl`, {
@@ -208,7 +206,7 @@ app.post("/register/urls", requireApiKey, async (req, res) => {
     const regData = await regRes.json();
 
     console.log("[Register] Response:", regData);
-    res.json({ ok: true, response: regData, registered_url: `${serverUrl}/callback/c2b` });
+    res.json({ ok: true, response: regData, registered_url: `${serverUrl}/notify/payment` });
 
   } catch (err) {
     res.status(500).json({ error: String(err) });
@@ -222,7 +220,6 @@ app.get("/health", (req, res) => {
   res.json({ ok: true, time: new Date().toISOString() });
 });
 
-// ── Start ──────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`M-PESA C2B server running on port ${PORT}`);
 });
