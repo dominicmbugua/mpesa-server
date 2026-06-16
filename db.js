@@ -4,7 +4,6 @@ const path     = require("path");
 // Store DB in /tmp on Railway (ephemeral but fine for testing)
 // For production, use a proper persistent volume or switch to postgres
 const DB_PATH = process.env.DB_PATH || path.join("/tmp", "mpesa.db");
-
 const db = new Database(DB_PATH);
 
 // ── Schema ─────────────────────────────────────────────────────────────
@@ -22,7 +21,6 @@ db.exec(`
     used             INTEGER NOT NULL DEFAULT 0,   -- 0 = pending, 1 = consumed by POS
     created_at       TEXT    NOT NULL DEFAULT (datetime('now'))
   );
-
   CREATE INDEX IF NOT EXISTS idx_payments_used_amount
     ON payments (used, amount);
 `);
@@ -39,35 +37,21 @@ function insertPayment(p) {
 }
 
 // ── Find the most recent unused payment matching amount (± 1 KES tolerance)
-// Optionally filters by account_ref and/or short_code ──────────────────
-function findPendingPayment({ amount, accountRef, shortCode }) {
-  // Build query dynamically based on what filters are provided
-  let query = `
+// Matches on amount + 10-minute window only — no account_ref or short_code
+// filter since Till payments have no account reference from the customer ──
+function findPendingPayment({ amount }) {
+  const query = `
     SELECT * FROM payments
     WHERE used = 0
       AND amount >= @minAmount
       AND amount <= @maxAmount
+      AND created_at >= datetime('now', '-10 minutes')
+    ORDER BY created_at DESC LIMIT 1
   `;
-  const params = {
+  return db.prepare(query).get({
     minAmount: amount - 1,
     maxAmount: amount + 1,
-  };
-
-  if (accountRef) {
-    query += ` AND account_ref = @accountRef`;
-    params.accountRef = accountRef;
-  }
-
-  if (shortCode) {
-    query += ` AND short_code = @shortCode`;
-    params.shortCode = shortCode;
-  }
-
-  // Only look at payments from the last 10 minutes to avoid old matches
-  query += ` AND created_at >= datetime('now', '-10 minutes')`;
-  query += ` ORDER BY created_at DESC LIMIT 1`;
-
-  return db.prepare(query).get(params) || null;
+  }) || null;
 }
 
 // ── Mark a payment as consumed so it can't be matched again ───────────
