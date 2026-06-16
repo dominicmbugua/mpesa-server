@@ -122,15 +122,13 @@ app.post("/notify/stk", (req, res) => {
 // ROUTE 3 — POS polls this to check for a pending payment
 // ═══════════════════════════════════════════════════════════════════════
 app.get("/payments/pending", requireApiKey, (req, res) => {
-  const amount     = parseFloat(req.query.amount     || "0");
-  const accountRef = (req.query.account_ref || "").trim();
-  const shortCode  = (req.query.short_code  || "").trim();
+  const amount = parseFloat(req.query.amount || "0");
 
   if (amount <= 0) {
     return res.status(400).json({ error: "amount is required" });
   }
 
-  const payment = db.findPendingPayment({ amount, accountRef, shortCode });
+  const payment = db.findPendingPayment({ amount });
 
   if (!payment) {
     return res.json({ found: false });
