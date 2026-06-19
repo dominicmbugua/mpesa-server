@@ -18,12 +18,17 @@ function requireApiKey(req, res, next) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// ROUTE 1 — Safaricom C2B callback
+// ROUTE 1 — Safaricom C2B callback (Till payments land here)
 // ═══════════════════════════════════════════════════════════════════════
 app.post("/notify/payment", (req, res) => {
   try {
     const body = req.body;
-    console.log("[C2B] Incoming payment:", JSON.stringify(body, null, 2));
+
+    // ── Detailed log so you can see it clearly on Railway ──
+    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    console.log("[C2B] ✅ Incoming till payment received");
+    console.log("[C2B] Raw body:", JSON.stringify(body, null, 2));
+    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
     const transactionId   = body.TransID            || body.TransactionID || "";
     const amount          = parseFloat(body.TransAmount || body.Amount || 0);
@@ -37,6 +42,7 @@ app.post("/notify/payment", (req, res) => {
     const transactionTime = body.TransTime          || new Date().toISOString();
 
     if (!transactionId || amount <= 0) {
+      console.warn("[C2B] ⚠️  Missing transactionId or amount — acknowledging but not saving");
       return res.json({ ResultCode: 0, ResultDesc: "Accepted" });
     }
 
@@ -51,11 +57,11 @@ app.post("/notify/payment", (req, res) => {
       raw:              JSON.stringify(body),
     });
 
-    console.log(`[C2B] Saved: ${transactionId} | ${customerName} | KES ${amount}`);
+    console.log(`[C2B] 💾 Saved: ${transactionId} | ${customerName} | KES ${amount} | ${phone}`);
     res.json({ ResultCode: 0, ResultDesc: "Accepted" });
 
   } catch (err) {
-    console.error("[C2B] Error:", err);
+    console.error("[C2B] ❌ Error:", err);
     res.json({ ResultCode: 0, ResultDesc: "Accepted" });
   }
 });
@@ -66,11 +72,13 @@ app.post("/notify/payment", (req, res) => {
 app.post("/notify/stk", (req, res) => {
   try {
     const body     = req.body;
+    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     console.log("[STK] Callback received:", JSON.stringify(body, null, 2));
+    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
     const callback = body?.Body?.stkCallback;
     if (!callback) {
-      console.warn("[STK] Invalid callback structure");
+      console.warn("[STK] ⚠️  Invalid callback structure");
       return res.json({ ResultCode: 0, ResultDesc: "Accepted" });
     }
 
@@ -81,7 +89,7 @@ app.post("/notify/stk", (req, res) => {
     console.log(`[STK] CheckoutRequestID: ${checkoutId} | ResultCode: ${resultCode} | ${resultDesc}`);
 
     if (resultCode !== 0) {
-      console.log(`[STK] Payment failed or cancelled — not storing. Code: ${resultCode}`);
+      console.log(`[STK] ❌ Payment failed or cancelled — Code: ${resultCode}`);
       return res.json({ ResultCode: 0, ResultDesc: "Accepted" });
     }
 
@@ -94,7 +102,7 @@ app.post("/notify/stk", (req, res) => {
     const transactionTime = String(getItem("TransactionDate") || new Date().toISOString());
 
     if (!receiptNumber || amount <= 0) {
-      console.warn("[STK] Missing receipt number or amount — skipping");
+      console.warn("[STK] ⚠️  Missing receipt number or amount — skipping");
       return res.json({ ResultCode: 0, ResultDesc: "Accepted" });
     }
 
@@ -109,17 +117,17 @@ app.post("/notify/stk", (req, res) => {
       raw:              JSON.stringify(body),
     });
 
-    console.log(`[STK] Saved: ${receiptNumber} | KES ${amount} | ${phone}`);
+    console.log(`[STK] 💾 Saved: ${receiptNumber} | KES ${amount} | ${phone}`);
     res.json({ ResultCode: 0, ResultDesc: "Accepted" });
 
   } catch (err) {
-    console.error("[STK] Callback error:", err);
+    console.error("[STK] ❌ Callback error:", err);
     res.json({ ResultCode: 0, ResultDesc: "Accepted" });
   }
 });
 
 // ═══════════════════════════════════════════════════════════════════════
-// ROUTE 3 — POS polls this to check for a pending payment
+// ROUTE 3 — POS polls for pending payment
 // ═══════════════════════════════════════════════════════════════════════
 app.get("/payments/pending", requireApiKey, (req, res) => {
   const amount = parseFloat(req.query.amount || "0");
@@ -146,7 +154,7 @@ app.get("/payments/pending", requireApiKey, (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════
-// ROUTE 4 — POS confirms it has consumed a payment
+// ROUTE 4 — POS confirms payment consumed
 // ═══════════════════════════════════════════════════════════════════════
 app.post("/payments/confirm", requireApiKey, (req, res) => {
   const { transaction_id } = req.body;
@@ -154,11 +162,12 @@ app.post("/payments/confirm", requireApiKey, (req, res) => {
     return res.status(400).json({ error: "transaction_id is required" });
   }
   db.markPaymentUsed(transaction_id);
+  console.log(`[CONFIRM] ✅ Payment marked used: ${transaction_id}`);
   res.json({ ok: true });
 });
 
 // ═══════════════════════════════════════════════════════════════════════
-// ROUTE 5 — Register C2B URLs with Safaricom (run once per shortcode)
+// ROUTE 5 — Register C2B URLs with Safaricom
 // ═══════════════════════════════════════════════════════════════════════
 app.post("/register/urls", requireApiKey, async (req, res) => {
   const { consumer_key, consumer_secret, short_code, environment } = req.body;
@@ -193,6 +202,9 @@ app.post("/register/urls", requireApiKey, async (req, res) => {
       ValidationURL:   `${serverUrl}/notify/payment`,
     };
 
+    console.log(`[REGISTER] Registering C2B URLs for shortcode: ${short_code}`);
+    console.log(`[REGISTER] ConfirmationURL: ${payload.ConfirmationURL}`);
+
     const regRes  = await fetch(`${baseUrl}/mpesa/c2b/v1/registerurl`, {
       method:  "POST",
       headers: {
@@ -203,7 +215,7 @@ app.post("/register/urls", requireApiKey, async (req, res) => {
     });
     const regData = await regRes.json();
 
-    console.log("[Register] Response:", regData);
+    console.log("[REGISTER] ✅ Safaricom response:", regData);
     res.json({ ok: true, response: regData, registered_url: `${serverUrl}/notify/payment` });
 
   } catch (err) {
@@ -218,6 +230,61 @@ app.get("/health", (req, res) => {
   res.json({ ok: true, time: new Date().toISOString() });
 });
 
+// ═══════════════════════════════════════════════════════════════════════
+// ROUTE 7 — Simulate a C2B till payment (for Postman testing)
+// ═══════════════════════════════════════════════════════════════════════
+app.post("/simulate/payment", requireApiKey, (req, res) => {
+  try {
+    const {
+      amount       = 1,
+      phone        = "254708374149",
+      first_name   = "Test",
+      last_name    = "Customer",
+      till_number  = "000000",
+      account_ref  = "",
+    } = req.body;
+
+    const transactionId = "SIM" + Date.now();
+    const customerName  = `${first_name} ${last_name}`.trim();
+
+    const fakeBody = {
+      TransID:           transactionId,
+      TransAmount:       String(amount),
+      MSISDN:            phone,
+      FirstName:         first_name,
+      LastName:          last_name,
+      BillRefNumber:     account_ref,
+      BusinessShortCode: till_number,
+      TransTime:         new Date().toISOString(),
+    };
+
+    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    console.log("[SIMULATE] 🧪 Simulated C2B till payment");
+    console.log("[SIMULATE] Body:", JSON.stringify(fakeBody, null, 2));
+    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+
+    db.insertPayment({
+      transaction_id:   transactionId,
+      amount:           parseFloat(amount),
+      phone,
+      customer_name:    customerName,
+      account_ref,
+      short_code:       till_number,
+      transaction_time: new Date().toISOString(),
+      raw:              JSON.stringify(fakeBody),
+    });
+
+    console.log(`[SIMULATE] 💾 Saved: ${transactionId} | ${customerName} | KES ${amount}`);
+    res.json({ ok: true, transaction_id: transactionId, message: "Simulated payment saved" });
+
+  } catch (err) {
+    console.error("[SIMULATE] ❌ Error:", err);
+    res.status(500).json({ error: String(err) });
+  }
+});
+
 app.listen(PORT, () => {
-  console.log(`M-PESA C2B server running on port ${PORT}`);
+  console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+  console.log(`✅ M-PESA C2B server running on port ${PORT}`);
+  console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
 });
