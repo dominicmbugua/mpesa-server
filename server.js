@@ -205,7 +205,9 @@ app.post("/register/urls", requireApiKey, async (req, res) => {
     console.log(`[REGISTER] Registering C2B URLs for shortcode: ${short_code}`);
     console.log(`[REGISTER] ConfirmationURL: ${payload.ConfirmationURL}`);
 
-    const regRes  = await fetch(`${baseUrl}/mpesa/c2b/v1/registerurl`, {
+    // NOTE: v1 endpoint is deprecated/unreliable for delivering live callbacks —
+    // updated to v2 per current Daraja docs.
+    const regRes  = await fetch(`${baseUrl}/mpesa/c2b/v2/registerurl`, {
       method:  "POST",
       headers: {
         Authorization:  `Bearer ${token}`,
